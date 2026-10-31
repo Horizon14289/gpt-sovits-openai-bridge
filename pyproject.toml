@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpt-sovits-openai-bridge"
+version = "0.2.0"
+description = "OpenAI-compatible TTS bridge for GPT-SoVITS"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Horizon14289" }]
+keywords = ["tts", "gpt-sovits", "openai", "text-to-speech", "local-tts"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+
+[project.scripts]
+gpt-sovits-bridge = "bridge:main"
+
+[tool.setuptools]
+py-modules = ["bridge"]

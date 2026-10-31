@@ -2,6 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
+[![CI](https://github.com/Horizon14289/gpt-sovits-openai-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/Horizon14289/gpt-sovits-openai-bridge/actions/workflows/ci.yml)
 
 把 [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) 的 `/tts` 接口包装成 **OpenAI 兼容**的 `/v1/audio/speech`，
 让任何支持 OpenAI TTS 的客户端（QQ 机器人、聊天前端、朗读插件、ChatGPT 兼容应用）都能用**你自己的本地音色**说话。
@@ -76,8 +77,13 @@ cp config.example.json config.json
 
 ```bash
 python bridge.py
-# 或指定配置
-python bridge.py -c my-config.json
+```
+
+也可以装成命令（可选）：
+
+```bash
+pip install .
+gpt-sovits-bridge          # 效果相同
 ```
 
 看到这样就是好了：
@@ -137,6 +143,8 @@ python test_client.py "你好，这是测试"
 | `text_split_method` | `cut5` | 长句切分策略 |
 | `speed` | `1.0` | 默认语速（客户端可覆盖，限制在 0.5–2.0） |
 | `timeout` | `600` | 单次请求超时（秒）。CPU 推理或首次加载要留足 |
+| `max_chars` | `1000` | 单次最大字数，超出返回 `413`（避免调用方干等几分钟） |
+| `retry` | `1` | 后端 5xx / 超时时的重试次数 |
 | `strip_ascii` | `true` | 剥离英文单词（见下文） |
 | `mp3` | `false` | 默认返回 mp3 而非 wav |
 | `ffmpeg` | `ffmpeg` | ffmpeg 路径，转 mp3 时才需要 |
@@ -154,6 +162,29 @@ Resource 'cmudict' not found
 开启后，`我用 ops bash 跑完了` 会变成 `我用 跑完了` 再送去合成。
 
 如果你的音色支持英文，把它设为 `false`。
+
+## 限制与并发
+
+**请求是串行的。** GPT-SoVITS 的推理不是并发安全的：两个请求同时打到 GPU 会串音，
+严重时直接爆显存。桥里用一把全局锁，后到的请求排队等待。
+
+代价是吞吐量等于单次耗时。如果你需要高并发，正确做法是**部署多个 GPT-SoVITS 实例 +
+一个负载均衡**，而不是把这里的锁去掉。
+
+**单次最多 1000 字**（可配）。超长文本会被拒绝而不是截断——截断会让人以为念完了。
+QQ 机器人、聊天客户端通常按句发送，不会触发这条。
+
+## 开发与测试
+
+冒烟测试**不需要 GPU、不需要 GPT-SoVITS**：它会起一个假后端，验证协议、错误分支和并发保护。
+
+```bash
+python tests/smoke_test.py
+```
+
+覆盖：健康检查、模型列表、正常合成、空文本、超长、全英文清洗、三请求并发串行化。
+
+CI 会在 Python 3.9 / 3.12 上各跑一遍（见 `.github/workflows/ci.yml`）。
 
 ## 常见用途
 

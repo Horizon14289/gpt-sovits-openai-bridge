@@ -14,15 +14,18 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 DEFAULTS = {
     "host": "127.0.0.1",
@@ -38,12 +41,20 @@ DEFAULTS = {
     "text_split_method": "cut5",
     "speed": 1.0,
     "timeout": 600,
+    # 单次请求最大字数，超出直接拒绝（避免调用方干等几分钟）
+    "max_chars": 1000,
+    # 后端返回 5xx / 超时时的重试次数
+    "retry": 1,
     # 去掉英文单词：多数中文微调音色缺英文音素，遇到英文会报错或念成乱码
     "strip_ascii": True,
     # 返回 mp3 而不是 wav（需要 ffmpeg）
     "mp3": False,
     "ffmpeg": "ffmpeg",
 }
+
+# GPT-SoVITS 的推理不是并发安全的：多个请求同时打到 GPU 会串音或爆显存。
+# 串行化是所有并发保护里最简单也最可靠的一种。
+_BACKEND_LOCK = threading.Lock()
 
 
 # ---------------------------------------------------------------- 配置加载
@@ -52,13 +63,16 @@ def load_config(path: str | None) -> dict:
     if path:
         with open(path, encoding="utf-8") as f:
             user = json.load(f)
-        unknown = set(user) - set(DEFAULTS)
-        if unknown:
-            log(f"[warn] 未知配置项将被忽略: {', '.join(sorted(unknown))}")
-        cfg.update(user)
     elif os.path.exists("config.json"):
         with open("config.json", encoding="utf-8") as f:
-            cfg.update(json.load(f))
+            user = json.load(f)
+    else:
+        return cfg
+
+    unknown = set(user) - set(DEFAULTS)
+    if unknown:
+        log(f"[warn] 未知配置项将被忽略: {', '.join(sorted(unknown))}")
+    cfg.update({k: v for k, v in user.items() if k in DEFAULTS})
     return cfg
 
 
@@ -79,8 +93,23 @@ def sanitize(text: str, strip_ascii: bool) -> str:
     return text.strip()
 
 
+def backend_port(cfg: dict) -> tuple[str, int]:
+    u = urlparse(cfg["backend"])
+    return (u.hostname or "127.0.0.1", u.port or 80)
+
+
+def backend_alive(cfg: dict, timeout: float = 1.5) -> bool:
+    """只探测 TCP 端口，不去猜后端的 HTTP 路径。"""
+    host, port = backend_port(cfg)
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 # ---------------------------------------------------------------- 后端调用
-def synthesize(cfg: dict, text: str, speed: float | None) -> bytes:
+def _call_backend(cfg: dict, text: str, speed: float | None) -> bytes:
     body = {
         "text": text,
         "text_lang": cfg["text_lang"],
@@ -100,6 +129,27 @@ def synthesize(cfg: dict, text: str, speed: float | None) -> bytes:
     )
     with urllib.request.urlopen(req, timeout=cfg["timeout"]) as resp:
         return resp.read()
+
+
+def synthesize(cfg: dict, text: str, speed: float | None) -> bytes:
+    """串行调用后端；5xx 与超时按配置重试。"""
+    attempts = max(0, int(cfg["retry"])) + 1
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            with _BACKEND_LOCK:
+                return _call_backend(cfg, text, speed)
+        except urllib.error.HTTPError as e:
+            if e.code < 500 or i == attempts - 1:
+                raise
+            last = e
+        except (urllib.error.URLError, TimeoutError, socket.timeout) as e:
+            if i == attempts - 1:
+                raise
+            last = e
+        log(f"[retry] 第 {i + 1} 次失败，{0.5 * (i + 1):.1f}s 后重试: {last}")
+        time.sleep(0.5 * (i + 1))
+    raise last if last else RuntimeError("unreachable")
 
 
 def to_mp3(cfg: dict, wav: bytes) -> bytes:
@@ -142,13 +192,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.startswith("/health"):
-            backend_ok = True
-            try:
-                urllib.request.urlopen(self.cfg["backend"].replace("/tts", "/docs"), timeout=3)
-            except Exception:
-                backend_ok = False
-            self._send_json(200, {"ok": True, "version": VERSION,
-                                  "backend": self.cfg["backend"], "backend_reachable": backend_ok})
+            self._send_json(200, {
+                "ok": True,
+                "version": VERSION,
+                "backend": self.cfg["backend"],
+                "backend_reachable": backend_alive(self.cfg),
+            })
             return
         if self.path.startswith("/v1/models"):
             self._send_json(200, {"object": "list", "data": [
@@ -171,6 +220,12 @@ class Handler(BaseHTTPRequestHandler):
         text = (payload.get("input") or payload.get("text") or "").strip()
         if not text:
             self._send_json(400, {"error": {"message": "missing 'input'"}})
+            return
+
+        if len(text) > self.cfg["max_chars"]:
+            self._send_json(413, {"error": {
+                "message": f"文本 {len(text)} 字，超过上限 {self.cfg['max_chars']} 字；"
+                           f"请自行分段，或调高配置里的 max_chars"}})
             return
 
         cleaned = sanitize(text, self.cfg["strip_ascii"])
@@ -205,7 +260,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 # ---------------------------------------------------------------- 入口
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="OpenAI-compatible TTS bridge for GPT-SoVITS")
     ap.add_argument("-c", "--config", help="配置文件路径（默认读取当前目录 config.json）")
     ap.add_argument("--host", help="监听地址，默认 127.0.0.1（只允许本机）")
@@ -214,7 +269,7 @@ def main() -> int:
     ap.add_argument("--ref-audio", help="参考音频路径")
     ap.add_argument("--prompt-text", help="参考音频对应文字")
     ap.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
     for key, val in (("host", args.host), ("port", args.port), ("backend", args.backend),
@@ -228,8 +283,9 @@ def main() -> int:
     Handler.cfg = cfg
     log(f"gpt-sovits-openai-bridge {VERSION}")
     log(f"  监听   http://{cfg['host']}:{cfg['port']}/v1")
-    log(f"  后端   {cfg['backend']}")
+    log(f"  后端   {cfg['backend']}（{'可达' if backend_alive(cfg) else '当前不可达'}）")
     log(f"  参考   {cfg['ref_audio_path']}")
+    log(f"  上限   {cfg['max_chars']} 字/次，并发串行")
     server = ThreadingHTTPServer((cfg["host"], cfg["port"]), Handler)
     try:
         server.serve_forever()
