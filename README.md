@@ -10,6 +10,18 @@
 
 > 本地 GPT-SoVITS + 这个桥 + 你的音色模型 = 一个完全离线的、任意音色的 TTS 服务。
 
+## 你需要先有什么
+
+在装这个桥之前，请确认你已经有：
+
+- **【必须】能跑起来的 GPT-SoVITS**——`api_v2.py` 已在 `127.0.0.1:9880` 正常服务（[下载地址](https://github.com/RVC-Boss/GPT-SoVITS)）
+- **【必须】一段参考人声**——3~10 秒、干净、无背景音乐，加上**它说的那句话的逐字文字**
+- **【可选】自己微调的音色模型**——`*.ckpt` + `*.pth`，没有也不影响使用
+
+**不需要：训练模型、标注数据、显卡之外的额外硬件、任何 API Key。**
+
+> 没有自己训的模型也能用：GPT-SoVITS 加载官方底模 + 你的参考音频即为**零样本推理**，效果取决于参考音频的干净程度。微调模型只是让音色更稳、更像。
+
 ---
 
 ## 它解决什么问题
@@ -57,6 +69,9 @@ cp config.example.json config.json
 | `ref_audio_path` | 参考音频（音色样本），相对 GPT-SoVITS 工作目录或绝对路径 |
 | `prompt_text` | **参考音频里说的原话，逐字一致**（含标点） |
 
+**没有微调模型也没关系。** 不填 `weights` 时，GPT-SoVITS 会用官方底模做零样本推理——
+只要参考音频够干净，音色就已经能用。想更稳再去微调。
+
 ### 3. 启动
 
 ```bash
@@ -73,14 +88,24 @@ gpt-sovits-openai-bridge 0.1.0
   后端   http://127.0.0.1:9880/tts
 ```
 
-### 4. 测试
+### 4. 30 秒验证
+
+先确认桥活着：
+
+```bash
+curl http://127.0.0.1:9881/health
+# {"ok": true, "backend_reachable": true, ...}
+```
+
+再合成一句话（Windows 可用 `python test_client.py "能听到吗"`）：
 
 ```bash
 curl -X POST http://127.0.0.1:9881/v1/audio/speech \
   -H "Content-Type: application/json" \
-  -d '{"model":"tts-1","input":"你好，这是本地音色。","response_format":"wav"}' \
-  --output test.wav
+  -d '{"input":"能听到吗","response_format":"wav"}' -o test.wav
 ```
+
+**听到声音 = 成功。** 第一次可能等十几秒（模型加载进显存），之后每句 1–3 秒。
 
 Windows 用 `test_client.py` 更方便：
 
