@@ -89,7 +89,7 @@ gpt-sovits-bridge          # 效果相同
 看到这样就是好了：
 
 ```
-gpt-sovits-openai-bridge 0.1.0
+gpt-sovits-openai-bridge 0.2.0
   监听   http://127.0.0.1:9881/v1
   后端   http://127.0.0.1:9880/tts
 ```

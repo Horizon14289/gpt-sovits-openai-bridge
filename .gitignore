@@ -10,3 +10,9 @@ venv/
 *.pth
 *.wav
 *.mp3
+.pkgenv/
+_*.json
+_*.log
+build/
+dist/
+*.egg-info/
